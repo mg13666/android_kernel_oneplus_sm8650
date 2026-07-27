@@ -36,10 +36,10 @@ jobs:
         run: |
           cd kernel
 
-          # LOCALVERSION must be present in the environment, even when empty.
-          # Linux setlocalversion otherwise appends '+' for a dirty/shallow tree
-          # when CONFIG_LOCALVERSION_AUTO is disabled.
-          export LOCALVERSION=
+          # Keep LOCALVERSION unset while Kconfig is generated. Exporting the
+          # same-named environment variable here overrides CONFIG_LOCALVERSION.
+          # Pass an empty value only to kernelrelease/build commands below so
+          # setlocalversion suppresses the trailing '+'.
           : > .scmversion
 
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
@@ -53,7 +53,17 @@ jobs:
 
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
 
-          RELEASE="$(make -s O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 kernelrelease)"
+          grep -q '^CONFIG_LOCALVERSION="-g638ecc425319"$' out/.config || {
+            echo 'ERROR: CONFIG_LOCALVERSION was not preserved'
+            grep '^CONFIG_LOCALVERSION' out/.config || true
+            exit 1
+          }
+          grep -q '^# CONFIG_LOCALVERSION_AUTO is not set$' out/.config || {
+            echo 'ERROR: CONFIG_LOCALVERSION_AUTO is still enabled'
+            exit 1
+          }
+
+          RELEASE="$(LOCALVERSION= make -s O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 kernelrelease)"
           echo "Kernel release: ${RELEASE}"
           test "${RELEASE}" = "${EXPECTED_KERNEL_RELEASE}" || {
             echo "ERROR: expected ${EXPECTED_KERNEL_RELEASE}, got ${RELEASE}"
@@ -66,8 +76,7 @@ jobs:
       - name: Build Image
         run: |
           cd kernel
-          export LOCALVERSION=
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image
+          LOCALVERSION= make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image
 
       - name: Verify exact Image release
         run: |
