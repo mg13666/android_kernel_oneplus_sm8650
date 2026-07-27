@@ -9,7 +9,8 @@ jobs:
     env:
       EXPECTED_KERNEL_RELEASE: 6.1.174-g638ecc425319
       AK3_ZIP: AnyKernel3-LineageOS-6.1.174-Docker-Ace5.zip
-      CLANG_VERSION: r487747c
+      CLANG_VERSION: r563880c
+      CLANG_COMMIT: f8439f0628d799092dd07df440a6334cab28939c
 
     steps:
       - name: Checkout kernel
@@ -33,19 +34,25 @@ jobs:
             bc bison build-essential ccache curl file flex git libelf-dev \
             libssl-dev python3 rsync unzip zip dwarves xz-utils
 
-      - name: Install project clang-r487747c
+      - name: Install exact LineageOS clang-r563880c build 14054515
         run: |
           mkdir -p "toolchain/${CLANG_VERSION}"
           curl -fL \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-${CLANG_VERSION}.tar.gz" \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${CLANG_COMMIT}/clang-${CLANG_VERSION}.tar.gz" \
             | tar -xz -C "toolchain/${CLANG_VERSION}"
-          "toolchain/${CLANG_VERSION}/bin/clang" --version
-          grep -q '487747' "toolchain/${CLANG_VERSION}/AndroidVersion.txt"
+          "toolchain/${CLANG_VERSION}/bin/clang" --version | tee clang-version.txt
+          grep -q 'clang version 21.0.0' clang-version.txt
+          grep -q 'r563880c' "toolchain/${CLANG_VERSION}/AndroidVersion.txt"
+          test -f "toolchain/${CLANG_VERSION}/manifest_14054515.xml"
 
       - name: Configure kernel from LineageOS device settings
         run: |
           cd kernel
           export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
+
+          # This source tree's scripts/setlocalversion explicitly prefers
+          # .scmversion over Git metadata. It therefore produces the exact
+          # release used by the installed LineageOS kernel without a '+' suffix.
           printf '%s' '-g638ecc425319' > .scmversion
 
           MAKE_FLAGS=(
@@ -65,6 +72,17 @@ jobs:
           make "${MAKE_FLAGS[@]}" olddefconfig
 
           grep -q '^CONFIG_LOCALVERSION_AUTO=y$' out/.config
+          grep -Fq 'based on r563880c) clang version 21.0.0' out/.config
+          for option in \
+            UTS_NS IPC_NS PID_NS USER_NS NET_NS \
+            CGROUP_PIDS CGROUP_DEVICE CHECKPOINT_RESTORE \
+            BRIDGE BRIDGE_NETFILTER NETFILTER_XT_MATCH_ADDRTYPE \
+            OVERLAY_FS VETH TUN; do
+            grep -q "^CONFIG_${option}=y$" out/.config || {
+              echo "ERROR: CONFIG_${option}=y is required for Docker/OCI"
+              exit 1
+            }
+          done
 
           RELEASE="$(make -s "${MAKE_FLAGS[@]}" kernelrelease)"
           echo "Kernel release: ${RELEASE}"
