@@ -76,20 +76,20 @@ jobs:
           cp Image AK_CLEAN/Image
           cat > AK_CLEAN/anykernel.sh <<'EOF'
           ### AnyKernel3 clean ramdisk mod script
-          # OnePlus Ace 5 / giuliac / LineageOS 23.2 / Android 16
+          # OnePlus Ace 5 / OP5D2BL1 / PKG110 / LineageOS 23.2 / Android 16
           # Kernel-only package: replaces boot kernel Image and preserves current ramdisk.
 
           properties() { '
           kernel.string=LineageOS 6.1.174 Docker/OCI clean kernel by mg13666
-          do.devicecheck=1
+          do.devicecheck=0
           do.modules=0
           do.systemless=1
           do.cleanup=1
           do.cleanuponabort=0
-          device.name1=giuliac
-          device.name2=oneplus_ace5_b
-          device.name3=PKG110
-          device.name4=OP5D2BL1
+          device.name1=OP5D2BL1
+          device.name2=PKG110
+          device.name3=giuliac
+          device.name4=oneplus_ace5_b
           supported.versions=16
           supported.patchlevels=
           '; }
@@ -103,15 +103,17 @@ jobs:
 
           split_boot
           write_boot
+          flash_boot
           EOF
           sed -i 's/^          //' AK_CLEAN/anykernel.sh
+          sh -n AK_CLEAN/anykernel.sh
           cd AK_CLEAN
           zip -qr9 ../AnyKernel3_CLEAN_LineageOS_6.1.174_Docker_OnePlusAce5.zip . -x 'README.md' 'LICENSE' '*.git*'
           cd ..
           unzip -t AnyKernel3_CLEAN_LineageOS_6.1.174_Docker_OnePlusAce5.zip
           sha256sum AnyKernel3_CLEAN_LineageOS_6.1.174_Docker_OnePlusAce5.zip > AnyKernel3_CLEAN_LineageOS_6.1.174_Docker_OnePlusAce5.zip.sha256
           echo '--- AK write ops ---'
-          grep -nE 'block=|write_boot|flash_boot|vendor_boot|init_boot|dtbo|do.modules|device.name' AK_CLEAN/anykernel.sh || true
+          grep -nE 'block=|write_boot|flash_boot|vendor_boot|init_boot|dtbo|do.modules|device.name|do.devicecheck' AK_CLEAN/anykernel.sh || true
 
       - name: Upload clean AnyKernel3 package
         uses: actions/upload-artifact@v4
