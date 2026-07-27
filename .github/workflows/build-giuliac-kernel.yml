@@ -104,6 +104,105 @@ jobs:
             CONFIG_GIULIAC_DTB=y \
             -j"$(nproc)" Image
 
+      - name: Build matching in-tree and external modules
+        run: |
+          export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
+          ln -sfn "$GITHUB_WORKSPACE/sm8650-modules" "$GITHUB_WORKSPACE/kernel/sm8650-modules"
+
+          COMMON_FLAGS=(
+            O=out
+            ARCH=arm64
+            LLVM=1
+            LLVM_IAS=1
+            CONFIG_OPLUS_DEVICE_DTBS=y
+            CONFIG_GIULIA_DTB=y
+            CONFIG_GIULIAC_DTB=y
+          )
+
+          echo '--- Build in-tree modules ---'
+          make -C kernel "${COMMON_FLAGS[@]}" -j"$(nproc)" modules
+
+          echo '--- Build external modules ---'
+          MODULE_ROOT="$GITHUB_WORKSPACE/sm8650-modules"
+          KERNEL_SRC="$GITHUB_WORKSPACE/kernel"
+          OUT_DIR="$GITHUB_WORKSPACE/kernel/out"
+
+          modules=(
+            qcom/opensource/mmrm-driver
+            qcom/opensource/mm-drivers/hw_fence
+            qcom/opensource/mm-drivers/msm_ext_display
+            qcom/opensource/mm-drivers/sync_fence
+            qcom/opensource/securemsm-kernel
+            qcom/opensource/audio-kernel
+            qcom/opensource/synx-kernel
+            qcom/opensource/camera-kernel
+            qcom/opensource/datarmnet-ext/mem
+            qcom/opensource/dataipa/drivers/platform/msm
+            qcom/opensource/datarmnet/core
+            qcom/opensource/datarmnet-ext/aps
+            qcom/opensource/datarmnet-ext/offload
+            qcom/opensource/datarmnet-ext/shs
+            qcom/opensource/datarmnet-ext/perf
+            qcom/opensource/datarmnet-ext/perf_tether
+            qcom/opensource/datarmnet-ext/sch
+            qcom/opensource/datarmnet-ext/wlan
+            qcom/opensource/display-drivers/msm
+            qcom/opensource/dsp-kernel
+            qcom/opensource/eva-kernel
+            qcom/opensource/video-driver
+            qcom/opensource/graphics-kernel
+            qcom/opensource/wlan/platform
+            qcom/opensource/wlan/qcacld-3.0/.kiwi_v2
+            qcom/opensource/wlan/qcacld-3.0/.qca6750
+            qcom/opensource/bt-kernel
+            qcom/opensource/spu-kernel
+            qcom/opensource/mm-sys-kernel/ubwcp
+            nxp/opensource/driver
+            oplus/hardware/radio/kernel/mdmfeature
+            oplus/kernel/cpu/thermal
+            oplus/kernel/device_info/pogo_keyboard
+            oplus/kernel/device_info/tri_state_key
+            oplus/kernel/dfr
+            oplus/kernel/graphics
+            oplus/kernel/network/oplus_network_oem_qmi
+            oplus/kernel/network/oplus_network_esim
+            oplus/kernel/network/oplus_network_sim_detect
+            oplus/kernel/network/oplus_rf_cable_monitor
+            oplus/kernel/touchpanel/oplus_touchscreen_v2/touch_custom
+            oplus/kernel/touchpanel/oplus_touchscreen_v2
+            oplus/kernel/touchpanel/synaptics_hbp
+            oplus/kernel/tp/hbp/hbp
+            oplus/secure/biometrics/fingerprints/bsp/uff/driver
+            oplus/secure/common/bsp/drivers/oplus_secure_common
+            oplus/sensor/kernel/oplus_consumer_ir
+            oplus/sensor/kernel/qcom/sensor
+          )
+
+          for mod in "${modules[@]}"; do
+            echo "=== external module: $mod ==="
+            make -C "$MODULE_ROOT/$mod" \
+              ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+              KERNEL_SRC="$KERNEL_SRC" \
+              OUT_DIR="$OUT_DIR" \
+              O="$OUT_DIR" \
+              TARGET_BOARD_PLATFORM=pineapple \
+              -j"$(nproc)" modules
+          done
+
+          mkdir -p module-package/all-ko
+          find kernel/out sm8650-modules -type f -name '*.ko' -print0 | \
+            xargs -0 -I{} cp -f {} module-package/all-ko/
+          find module-package/all-ko -type f -name '*.ko' | sort > module-package/all-ko.list
+          wc -l module-package/all-ko.list
+          while read -r ko; do
+            strings "$ko" | grep -m1 'vermagic=6.1.174-g638ecc425319' >/dev/null || {
+              echo "ERROR: bad vermagic: $ko"
+              strings "$ko" | grep -m1 vermagic || true
+              exit 1
+            }
+          done < module-package/all-ko.list
+          tar -C module-package -czf matching-modules-docker-r563880c.tar.gz all-ko all-ko.list
+
       - name: Verify exact Image release
         run: |
           IMAGE=kernel/out/arch/arm64/boot/Image
@@ -206,6 +305,12 @@ jobs:
           path: |
             AnyKernel3-LineageOS-6.1.174-Docker-Ace5.zip
             AnyKernel3-LineageOS-6.1.174-Docker-Ace5.zip.sha256
+
+      - name: Upload matching module package
+        uses: actions/upload-artifact@v4
+        with:
+          name: matching-modules-docker-r563880c
+          path: matching-modules-docker-r563880c.tar.gz
 
       - name: Upload debug files
         uses: actions/upload-artifact@v4
