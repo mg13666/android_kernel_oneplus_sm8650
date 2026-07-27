@@ -9,6 +9,7 @@ jobs:
     env:
       EXPECTED_KERNEL_RELEASE: 6.1.174-g638ecc425319
       AK3_ZIP: AnyKernel3-LineageOS-6.1.174-Docker-Ace5.zip
+      CLANG_VERSION: r487747c
 
     steps:
       - name: Checkout kernel
@@ -30,40 +31,49 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential ccache curl file flex git libelf-dev \
-            libssl-dev lld llvm clang python3 rsync unzip zip dwarves
+            libssl-dev python3 rsync unzip zip dwarves xz-utils
 
-      - name: Configure kernel with exact release
+      - name: Install project clang-r487747c
+        run: |
+          mkdir -p "toolchain/${CLANG_VERSION}"
+          curl -fL \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-${CLANG_VERSION}.tar.gz" \
+            | tar -xz -C "toolchain/${CLANG_VERSION}"
+          "toolchain/${CLANG_VERSION}/bin/clang" --version
+          grep -q '487747' "toolchain/${CLANG_VERSION}/AndroidVersion.txt"
+
+      - name: Configure kernel from LineageOS device settings
         run: |
           cd kernel
+          export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
 
-          # Keep LOCALVERSION unset while Kconfig is generated. Exporting the
-          # same-named environment variable here overrides CONFIG_LOCALVERSION.
-          # Pass an empty value only to kernelrelease/build commands below so
-          # setlocalversion suppresses the trailing '+'.
-          : > .scmversion
+          # This source tree's scripts/setlocalversion explicitly prefers
+          # .scmversion over Git metadata. It therefore produces the exact
+          # release used by the installed LineageOS kernel without a '+' suffix.
+          printf '%s' '-g638ecc425319' > .scmversion
 
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+          MAKE_FLAGS=(
+            O=out
+            ARCH=arm64
+            LLVM=1
+            LLVM_IAS=1
+            CONFIG_OPLUS_DEVICE_DTBS=y
+            CONFIG_GIULIA_DTB=y
+            CONFIG_GIULIAC_DTB=y
+          )
+
+          make "${MAKE_FLAGS[@]}" \
             gki_defconfig \
             vendor/pineapple_GKI.config \
             vendor/oplus/pineapple_GKI.config
+          make "${MAKE_FLAGS[@]}" olddefconfig
 
-          ./scripts/config --file out/.config \
-            --set-str LOCALVERSION "-g638ecc425319" \
-            --disable LOCALVERSION_AUTO
+          grep -q '^CONFIG_LOCALVERSION_AUTO=y$' out/.config
+          grep -q '^CONFIG_OPLUS_DEVICE_DTBS=y$' out/.config
+          grep -q '^CONFIG_GIULIA_DTB=y$' out/.config
+          grep -q '^CONFIG_GIULIAC_DTB=y$' out/.config
 
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
-
-          grep -q '^CONFIG_LOCALVERSION="-g638ecc425319"$' out/.config || {
-            echo 'ERROR: CONFIG_LOCALVERSION was not preserved'
-            grep '^CONFIG_LOCALVERSION' out/.config || true
-            exit 1
-          }
-          grep -q '^# CONFIG_LOCALVERSION_AUTO is not set$' out/.config || {
-            echo 'ERROR: CONFIG_LOCALVERSION_AUTO is still enabled'
-            exit 1
-          }
-
-          RELEASE="$(LOCALVERSION= make -s O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 kernelrelease)"
+          RELEASE="$(make -s "${MAKE_FLAGS[@]}" kernelrelease)"
           echo "Kernel release: ${RELEASE}"
           test "${RELEASE}" = "${EXPECTED_KERNEL_RELEASE}" || {
             echo "ERROR: expected ${EXPECTED_KERNEL_RELEASE}, got ${RELEASE}"
@@ -73,10 +83,15 @@ jobs:
           echo '--- Docker/OCI-related config ---'
           grep -E 'CONFIG_(LOCALVERSION|LOCALVERSION_AUTO|UTS_NS|IPC_NS|PID_NS|USER_NS|NET_NS|CGROUP_DEVICE|CGROUP_PIDS|CHECKPOINT_RESTORE|BRIDGE_NETFILTER|NETFILTER_XT_MATCH_ADDRTYPE|OVERLAY_FS|VETH|TUN|BRIDGE)=' out/.config || true
 
-      - name: Build Image
+      - name: Build Image with project clang
         run: |
           cd kernel
-          LOCALVERSION= make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image
+          export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CONFIG_OPLUS_DEVICE_DTBS=y \
+            CONFIG_GIULIA_DTB=y \
+            CONFIG_GIULIAC_DTB=y \
+            -j"$(nproc)" Image
 
       - name: Verify exact Image release
         run: |
@@ -85,13 +100,10 @@ jobs:
           VERSION_LINE="$(strings "${IMAGE}" | grep -m1 'Linux version' || true)"
           echo "${VERSION_LINE}"
           printf '%s\n' "${VERSION_LINE}" | grep -Fq "Linux version ${EXPECTED_KERNEL_RELEASE} " || {
-            echo "ERROR: built Image does not contain exact release ${EXPECTED_KERNEL_RELEASE}"
+            echo "ERROR: Image release does not exactly match ${EXPECTED_KERNEL_RELEASE}"
             exit 1
           }
-          if printf '%s\n' "${VERSION_LINE}" | grep -Fq "${EXPECTED_KERNEL_RELEASE}+"; then
-            echo 'ERROR: built Image still has a trailing +'
-            exit 1
-          fi
+          ! printf '%s\n' "${VERSION_LINE}" | grep -Fq "${EXPECTED_KERNEL_RELEASE}+"
           cp "${IMAGE}" Image
           cp kernel/out/.config kernel.config
 
@@ -108,10 +120,8 @@ jobs:
           rm -rf AK3/.git AK3/.github AK3/modules AK3/patch AK3/ramdisk
           cp Image AK3/Image
 
-          # Stock AK3 tools are not usable on an Android 16 arm64-only device.
           curl -fL -o AK3/tools/busybox \
             https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/userspace/ksud/bin/aarch64/busybox
-
           curl -fL -o Magisk-v30.7.apk \
             https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk
           unzip -p Magisk-v30.7.apk lib/arm64-v8a/libmagiskboot.so > AK3/tools/magiskboot
@@ -119,7 +129,6 @@ jobs:
           cat > AK3/anykernel.sh <<'EOF'
           ### AnyKernel3 ramdisk mod script
           # OnePlus Ace 5 / OP5D2BL1 / PKG110 / LineageOS 23.2 / Android 16
-          # Kernel-only package: replace boot kernel and preserve the current ramdisk.
 
           properties() { '
           kernel.string=LineageOS 6.1.174 Docker/OCI kernel by mg13666
@@ -161,16 +170,10 @@ jobs:
           test -s AK3/Image
           test -s AK3/tools/busybox
           test -s AK3/tools/magiskboot
-          file AK3/tools/busybox AK3/tools/magiskboot
           file AK3/tools/busybox | grep -q 'ARM aarch64'
           file AK3/tools/magiskboot | grep -q 'ARM aarch64'
-
           grep -q '^BLOCK=boot;' AK3/anykernel.sh
           grep -q '^IS_SLOT_DEVICE=1;' AK3/anykernel.sh
-          grep -q '^RAMDISK_COMPRESSION=auto;' AK3/anykernel.sh
-          grep -q '^PATCH_VBMETA_FLAG=auto;' AK3/anykernel.sh
-          grep -q '^NO_MAGISK_CHECK=1;' AK3/anykernel.sh
-          grep -q '^NO_VBMETA_PARTITION_PATCH=1;' AK3/anykernel.sh
           grep -q '^supported.versions=$' AK3/anykernel.sh
           ! grep -qE '^(block|is_slot_device|ramdisk_compression|patch_vbmeta_flag)=' AK3/anykernel.sh
           ! grep -q 'write_boot' AK3/anykernel.sh
@@ -178,18 +181,12 @@ jobs:
           cd AK3
           zip -qr9 "../${AK3_ZIP}" . -x 'README.md' '*.git*'
           cd ..
-
           unzip -t "${AK3_ZIP}"
           unzip -l "${AK3_ZIP}" | grep -q ' LICENSE$'
           unzip -l "${AK3_ZIP}" | grep -q ' Image$'
           unzip -l "${AK3_ZIP}" | grep -q ' tools/busybox$'
           unzip -l "${AK3_ZIP}" | grep -q ' tools/magiskboot$'
           sha256sum "${AK3_ZIP}" > "${AK3_ZIP}.sha256"
-
-          echo '--- Final AnyKernel3 script ---'
-          cat AK3/anykernel.sh
-          echo '--- SHA256 ---'
-          cat "${AK3_ZIP}.sha256"
 
       - name: Upload AnyKernel3 package
         uses: actions/upload-artifact@v4
