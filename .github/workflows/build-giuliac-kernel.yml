@@ -42,8 +42,14 @@ jobs:
             gki_defconfig \
             vendor/pineapple_GKI.config \
             vendor/oplus/pineapple_GKI.config
+          ./scripts/config --file out/.config \
+            --set-str LOCALVERSION "-g638ecc425319" \
+            --disable LOCALVERSION_AUTO
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          echo '--- kernel release ---'
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 kernelrelease
           echo '--- docker related config ---'
-          grep -E 'CONFIG_(UTS_NS|IPC_NS|PID_NS|USER_NS|NET_NS|CGROUP_DEVICE|CGROUP_PIDS|CHECKPOINT_RESTORE|BRIDGE_NETFILTER|NETFILTER_XT_MATCH_ADDRTYPE|OVERLAY_FS|VETH|TUN|BRIDGE)=' out/.config || true
+          grep -E 'CONFIG_(LOCALVERSION|LOCALVERSION_AUTO|UTS_NS|IPC_NS|PID_NS|USER_NS|NET_NS|CGROUP_DEVICE|CGROUP_PIDS|CHECKPOINT_RESTORE|BRIDGE_NETFILTER|NETFILTER_XT_MATCH_ADDRTYPE|OVERLAY_FS|VETH|TUN|BRIDGE)=' out/.config || true
 
       - name: Build Image
         run: |
