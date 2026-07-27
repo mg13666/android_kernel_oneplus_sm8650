@@ -102,7 +102,6 @@ jobs:
           . tools/ak3-core.sh
 
           split_boot
-          write_boot
           flash_boot
           EOF
           sed -i 's/^          //' AK_CLEAN/anykernel.sh
