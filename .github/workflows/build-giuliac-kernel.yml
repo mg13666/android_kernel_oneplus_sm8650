@@ -1,0 +1,52 @@
+name: Build giuliac LineageOS kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex git libelf-dev \
+            libssl-dev lld llvm clang python3 rsync unzip zip dwarves
+
+      - name: Show kernel version
+        run: |
+          head -5 Makefile
+
+      - name: Configure kernel
+        run: |
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            gki_defconfig \
+            vendor/pineapple_GKI.config \
+            vendor/oplus/pineapple_GKI.config
+          echo '--- docker related config ---'
+          grep -E 'CONFIG_(UTS_NS|IPC_NS|PID_NS|USER_NS|NET_NS|CGROUP_DEVICE|CGROUP_PIDS|CHECKPOINT_RESTORE|BRIDGE_NETFILTER|NETFILTER_XT_MATCH_ADDRTYPE|OVERLAY_FS|VETH|TUN|BRIDGE)=' out/.config || true
+
+      - name: Build Image
+        run: |
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 -j$(nproc) Image
+
+      - name: Verify Image
+        run: |
+          file out/arch/arm64/boot/Image
+          strings out/arch/arm64/boot/Image | grep -m1 'Linux version' || true
+          cp out/arch/arm64/boot/Image ./Image
+          cp out/.config ./kernel.config
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: giuliac-lineage-6.1.174-docker-image
+          path: |
+            Image
+            kernel.config
