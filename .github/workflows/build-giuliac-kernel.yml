@@ -1,4 +1,4 @@
-name: Build giuliac LineageOS kernel
+name: Build giuliac LineageOS Docker kernel
 
 on:
   workflow_dispatch:
@@ -6,6 +6,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      EXPECTED_KERNEL_RELEASE: 6.1.174-g638ecc425319
+      AK3_ZIP: AnyKernel3-LineageOS-6.1.174-Docker-Ace5.zip
+
     steps:
       - name: Checkout kernel
         uses: actions/checkout@v4
@@ -25,62 +29,91 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison build-essential ccache curl flex git libelf-dev \
+            bc bison build-essential ccache curl file flex git libelf-dev \
             libssl-dev lld llvm clang python3 rsync unzip zip dwarves
 
-      - name: Show kernel version
+      - name: Configure kernel with exact release
         run: |
           cd kernel
-          head -5 Makefile
-          ls -l drivers/base/kernelFwUpdate || true
-          ls -l ../sm8650-modules/oplus/kernel/touchpanel/kernelFwUpdate/Kconfig || true
 
-      - name: Configure kernel
-        run: |
-          cd kernel
-          echo '' > .scmversion
+          # LOCALVERSION must be present in the environment, even when empty.
+          # Linux setlocalversion otherwise appends '+' for a dirty/shallow tree
+          # when CONFIG_LOCALVERSION_AUTO is disabled.
+          export LOCALVERSION=
+          : > .scmversion
+
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             gki_defconfig \
             vendor/pineapple_GKI.config \
             vendor/oplus/pineapple_GKI.config
+
           ./scripts/config --file out/.config \
             --set-str LOCALVERSION "-g638ecc425319" \
             --disable LOCALVERSION_AUTO
+
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
-          echo '--- kernel release ---'
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 kernelrelease
-          echo '--- docker related config ---'
+
+          RELEASE="$(make -s O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 kernelrelease)"
+          echo "Kernel release: ${RELEASE}"
+          test "${RELEASE}" = "${EXPECTED_KERNEL_RELEASE}" || {
+            echo "ERROR: expected ${EXPECTED_KERNEL_RELEASE}, got ${RELEASE}"
+            exit 1
+          }
+
+          echo '--- Docker/OCI-related config ---'
           grep -E 'CONFIG_(LOCALVERSION|LOCALVERSION_AUTO|UTS_NS|IPC_NS|PID_NS|USER_NS|NET_NS|CGROUP_DEVICE|CGROUP_PIDS|CHECKPOINT_RESTORE|BRIDGE_NETFILTER|NETFILTER_XT_MATCH_ADDRTYPE|OVERLAY_FS|VETH|TUN|BRIDGE)=' out/.config || true
 
       - name: Build Image
         run: |
           cd kernel
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 -j$(nproc) Image
+          export LOCALVERSION=
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image
 
-      - name: Verify Image
+      - name: Verify exact Image release
         run: |
-          cd kernel
-          file out/arch/arm64/boot/Image
-          strings out/arch/arm64/boot/Image | grep -m1 'Linux version' || true
-          cp out/arch/arm64/boot/Image ../Image
-          cp out/.config ../kernel.config
+          IMAGE=kernel/out/arch/arm64/boot/Image
+          file "${IMAGE}"
+          VERSION_LINE="$(strings "${IMAGE}" | grep -m1 'Linux version' || true)"
+          echo "${VERSION_LINE}"
+          printf '%s\n' "${VERSION_LINE}" | grep -Fq "Linux version ${EXPECTED_KERNEL_RELEASE} " || {
+            echo "ERROR: built Image does not contain exact release ${EXPECTED_KERNEL_RELEASE}"
+            exit 1
+          }
+          if printf '%s\n' "${VERSION_LINE}" | grep -Fq "${EXPECTED_KERNEL_RELEASE}+"; then
+            echo 'ERROR: built Image still has a trailing +'
+            exit 1
+          fi
+          cp "${IMAGE}" Image
+          cp kernel/out/.config kernel.config
 
-      - name: Build clean AnyKernel3 package
+      - name: Build verified ARM64 AnyKernel3 package
         run: |
-          set -e
-          curl -L -o AnyKernel3.zip https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip
+          curl -fL -o AnyKernel3.zip \
+            https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip
           unzip -q AnyKernel3.zip
-          mv AnyKernel3-master AK_CLEAN
-          find AK_CLEAN -maxdepth 1 -type f \( -name 'Image*' -o -name '*.dtb' -o -name '*.dtbo' -o -name '*.ko' \) -delete
-          rm -rf AK_CLEAN/.git AK_CLEAN/.github AK_CLEAN/modules AK_CLEAN/patch AK_CLEAN/ramdisk
-          cp Image AK_CLEAN/Image
-          cat > AK_CLEAN/anykernel.sh <<'EOF'
-          ### AnyKernel3 clean ramdisk mod script
+          mv AnyKernel3-master AK3
+
+          find AK3 -maxdepth 1 -type f \( \
+            -name 'Image*' -o -name '*.dtb' -o -name '*.dtbo' -o -name '*.ko' \
+          \) -delete
+          rm -rf AK3/.git AK3/.github AK3/modules AK3/patch AK3/ramdisk
+          cp Image AK3/Image
+
+          # Stock AK3 tools are not usable on an Android 16 arm64-only device.
+          curl -fL -o AK3/tools/busybox \
+            https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/userspace/ksud/bin/aarch64/busybox
+
+          curl -fL -o Magisk-v30.7.apk \
+            https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk
+          unzip -p Magisk-v30.7.apk lib/arm64-v8a/libmagiskboot.so > AK3/tools/magiskboot
+
+          cat > AK3/anykernel.sh <<'EOF'
+          ### AnyKernel3 ramdisk mod script
           # OnePlus Ace 5 / OP5D2BL1 / PKG110 / LineageOS 23.2 / Android 16
-          # Kernel-only package: replaces boot kernel Image and preserves current ramdisk.
+          # Kernel-only package: replace boot kernel and preserve the current ramdisk.
 
           properties() { '
-          kernel.string=LineageOS 6.1.174 Docker/OCI clean kernel by mg13666
+          kernel.string=LineageOS 6.1.174 Docker/OCI kernel by mg13666
           do.devicecheck=0
           do.modules=0
           do.systemless=1
@@ -90,37 +123,72 @@ jobs:
           device.name2=PKG110
           device.name3=giuliac
           device.name4=oneplus_ace5_b
-          supported.versions=16
+          supported.versions=
           supported.patchlevels=
           '; }
 
-          block=boot
-          is_slot_device=auto
-          ramdisk_compression=auto
-          patch_vbmeta_flag=auto
+          BLOCK=boot;
+          IS_SLOT_DEVICE=1;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+          NO_MAGISK_CHECK=1;
+          NO_VBMETA_PARTITION_PATCH=1;
 
           . tools/ak3-core.sh
 
           split_boot
           flash_boot
           EOF
-          sed -i 's/^          //' AK_CLEAN/anykernel.sh
-          sh -n AK_CLEAN/anykernel.sh
-          cd AK_CLEAN
-          zip -qr9 ../AnyKernel3_CLEAN_LineageOS_6.1.174_Docker_OnePlusAce5.zip . -x 'README.md' 'LICENSE' '*.git*'
-          cd ..
-          unzip -t AnyKernel3_CLEAN_LineageOS_6.1.174_Docker_OnePlusAce5.zip
-          sha256sum AnyKernel3_CLEAN_LineageOS_6.1.174_Docker_OnePlusAce5.zip > AnyKernel3_CLEAN_LineageOS_6.1.174_Docker_OnePlusAce5.zip.sha256
-          echo '--- AK write ops ---'
-          grep -nE 'block=|write_boot|flash_boot|vendor_boot|init_boot|dtbo|do.modules|device.name|do.devicecheck' AK_CLEAN/anykernel.sh || true
+          sed -i 's/^          //' AK3/anykernel.sh
 
-      - name: Upload clean AnyKernel3 package
+          chmod 755 \
+            AK3/anykernel.sh \
+            AK3/tools/busybox \
+            AK3/tools/magiskboot \
+            AK3/META-INF/com/google/android/update-binary
+
+          sh -n AK3/anykernel.sh
+          test -s AK3/LICENSE
+          test -s AK3/Image
+          test -s AK3/tools/busybox
+          test -s AK3/tools/magiskboot
+          file AK3/tools/busybox AK3/tools/magiskboot
+          file AK3/tools/busybox | grep -q 'ARM aarch64'
+          file AK3/tools/magiskboot | grep -q 'ARM aarch64'
+
+          grep -q '^BLOCK=boot;' AK3/anykernel.sh
+          grep -q '^IS_SLOT_DEVICE=1;' AK3/anykernel.sh
+          grep -q '^RAMDISK_COMPRESSION=auto;' AK3/anykernel.sh
+          grep -q '^PATCH_VBMETA_FLAG=auto;' AK3/anykernel.sh
+          grep -q '^NO_MAGISK_CHECK=1;' AK3/anykernel.sh
+          grep -q '^NO_VBMETA_PARTITION_PATCH=1;' AK3/anykernel.sh
+          grep -q '^supported.versions=$' AK3/anykernel.sh
+          ! grep -qE '^(block|is_slot_device|ramdisk_compression|patch_vbmeta_flag)=' AK3/anykernel.sh
+          ! grep -q 'write_boot' AK3/anykernel.sh
+
+          cd AK3
+          zip -qr9 "../${AK3_ZIP}" . -x 'README.md' '*.git*'
+          cd ..
+
+          unzip -t "${AK3_ZIP}"
+          unzip -l "${AK3_ZIP}" | grep -q ' LICENSE$'
+          unzip -l "${AK3_ZIP}" | grep -q ' Image$'
+          unzip -l "${AK3_ZIP}" | grep -q ' tools/busybox$'
+          unzip -l "${AK3_ZIP}" | grep -q ' tools/magiskboot$'
+          sha256sum "${AK3_ZIP}" > "${AK3_ZIP}.sha256"
+
+          echo '--- Final AnyKernel3 script ---'
+          cat AK3/anykernel.sh
+          echo '--- SHA256 ---'
+          cat "${AK3_ZIP}.sha256"
+
+      - name: Upload AnyKernel3 package
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3_CLEAN_LineageOS_6.1.174_Docker_OnePlusAce5
+          name: AnyKernel3-LineageOS-6.1.174-Docker-Ace5
           path: |
-            AnyKernel3_CLEAN_LineageOS_6.1.174_Docker_OnePlusAce5.zip
-            AnyKernel3_CLEAN_LineageOS_6.1.174_Docker_OnePlusAce5.zip.sha256
+            AnyKernel3-LineageOS-6.1.174-Docker-Ace5.zip
+            AnyKernel3-LineageOS-6.1.174-Docker-Ace5.zip.sha256
 
       - name: Upload debug files
         uses: actions/upload-artifact@v4
