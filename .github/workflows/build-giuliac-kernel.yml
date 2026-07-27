@@ -38,6 +38,7 @@ jobs:
       - name: Configure kernel
         run: |
           cd kernel
+          echo '' > .scmversion
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             gki_defconfig \
             vendor/pineapple_GKI.config \
