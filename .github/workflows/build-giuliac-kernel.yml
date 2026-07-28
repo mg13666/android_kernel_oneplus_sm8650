@@ -178,6 +178,12 @@ jobs:
               s = p.read_text(errors='ignore')
               ns = s.replace('$(KERNEL_SRC)/$(M)', '$(M)')
               ns = ns.replace('$(KERNEL_SRC)/$(PWD)', '$(PWD)')
+              # Remove the exact line injected by older workflow revisions.
+              # Cached module trees may retain it even after the matching
+              # rule is fixed; qcacld then ends with KBUILD_EXTRA_SYMBOLS="".
+              ns = ns.replace(
+                  'KBUILD_OPTIONS += KBUILD_EXTRA_SYMBOLS="$(KBUILD_EXTRA_SYMBOLS)"\n',
+                  '')
               # With an absolute external M, Kbuild's $(src) is already an
               # absolute path. Prefixing it with $(srctree) breaks includes,
               # e.g. dataipa cannot find datarmnet-ext/mem/rmnet_mem.h.
