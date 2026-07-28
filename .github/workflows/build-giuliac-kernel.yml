@@ -183,6 +183,29 @@ jobs:
               # e.g. dataipa cannot find datarmnet-ext/mem/rmnet_mem.h.
               ns = ns.replace('$(srctree)/$(src)', '$(src)')
               ns = ns.replace('$(srctree)/$(M)', '$(M)')
+
+              # Several vendor wrappers declare KBUILD_EXTRA_SYMBOLS but
+              # either never pass it to the recursive kernel make, or append
+              # the bare paths as make targets. Normalize those wrappers to
+              # pass one proper variable assignment to modpost.
+              if p.name == 'Makefile' \
+                 and 'KBUILD_EXTRA_SYMBOLS' in ns \
+                 and 'KBUILD_OPTIONS += KBUILD_EXTRA_SYMBOLS=' not in ns \
+                 and 'KBUILD_OPTIONS+=KBUILD_EXTRA_SYMBOLS=' not in ns:
+                  import re
+                  lines = [line.replace(' $(KBUILD_EXTRA_SYMBOLS)', '')
+                           if '$(MAKE)' in line else line
+                           for line in ns.splitlines()]
+                  insert_at = next(
+                      (i for i, line in enumerate(lines)
+                       if re.match(r'^[A-Za-z0-9_%./-]+\s*:(?!=)', line)),
+                      len(lines))
+                  lines[insert_at:insert_at] = [
+                      'KBUILD_OPTIONS += KBUILD_EXTRA_SYMBOLS="$(KBUILD_EXTRA_SYMBOLS)"',
+                      ''
+                  ]
+                  ns = '\n'.join(lines) + ('\n' if ns.endswith('\n') else '')
+
               if ns != s:
                   p.write_text(ns)
                   print('patched', p)
