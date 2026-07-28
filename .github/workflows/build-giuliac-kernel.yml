@@ -184,15 +184,18 @@ jobs:
               ns = ns.replace('$(srctree)/$(src)', '$(src)')
               ns = ns.replace('$(srctree)/$(M)', '$(M)')
 
-              # Several vendor wrappers declare KBUILD_EXTRA_SYMBOLS but
-              # either never pass it to the recursive kernel make, or append
-              # the bare paths as make targets. Normalize those wrappers to
-              # pass one proper variable assignment to modpost.
+              # Several vendor wrappers declare a standalone
+              # KBUILD_EXTRA_SYMBOLS variable but never pass it to recursive
+              # kernel make. Only patch that exact declaration form. Do not
+              # touch wrappers such as qcacld which already put symbol-table
+              # assignments inside a multiline KBUILD_OPTIONS value.
+              import re
+              standalone_extra_symbols = re.search(
+                  r'(?m)^KBUILD_EXTRA_SYMBOLS\s*[:+?]?=', ns)
               if p.name == 'Makefile' \
-                 and 'KBUILD_EXTRA_SYMBOLS' in ns \
+                 and standalone_extra_symbols \
                  and 'KBUILD_OPTIONS += KBUILD_EXTRA_SYMBOLS=' not in ns \
                  and 'KBUILD_OPTIONS+=KBUILD_EXTRA_SYMBOLS=' not in ns:
-                  import re
                   lines = [line.replace(' $(KBUILD_EXTRA_SYMBOLS)', '')
                            if '$(MAKE)' in line else line
                            for line in ns.splitlines()]
