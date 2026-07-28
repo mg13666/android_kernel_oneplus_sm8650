@@ -127,6 +127,19 @@ jobs:
           KERNEL_SRC="$GITHUB_WORKSPACE/kernel"
           OUT_DIR="$GITHUB_WORKSPACE/kernel/out"
 
+          echo '--- Patch external module Makefiles for absolute M paths ---'
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path('sm8650-modules')
+          for p in root.rglob('Makefile'):
+              s = p.read_text(errors='ignore')
+              ns = s.replace('$(KERNEL_SRC)/$(M)', '$(M)')
+              ns = ns.replace('$(KERNEL_SRC)/$(PWD)', '$(PWD)')
+              if ns != s:
+                  p.write_text(ns)
+                  print('patched', p)
+          PY
+
           modules=(
             qcom/opensource/mmrm-driver
             qcom/opensource/mm-drivers/hw_fence
