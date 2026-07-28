@@ -190,6 +190,18 @@ jobs:
               ns = ns.replace('$(srctree)/$(src)', '$(src)')
               ns = ns.replace('$(srctree)/$(M)', '$(M)')
 
+              # qcacld is invoked through profile aliases such as .kiwi_v2.
+              # Relative symbol paths based on $(M) can fail through those
+              # aliases even though the dependency files exist. Anchor both
+              # dependencies at kernel/out, as other vendor wrappers do.
+              if p.as_posix().endswith('/wlan/qcacld-3.0/Makefile'):
+                  ns = ns.replace(
+                      'KBUILD_EXTRA_SYMBOLS=$(M)/../../../dataipa/drivers/platform/msm/Module.symvers',
+                      'KBUILD_EXTRA_SYMBOLS=$(OUT_DIR)/../sm8650-modules/qcom/opensource/dataipa/drivers/platform/msm/Module.symvers')
+                  ns = ns.replace(
+                      'KBUILD_EXTRA_SYMBOLS+=$(M)/../../platform/Module.symvers',
+                      'KBUILD_EXTRA_SYMBOLS+=$(OUT_DIR)/../sm8650-modules/qcom/opensource/wlan/platform/Module.symvers')
+
               # Several vendor wrappers declare a standalone
               # KBUILD_EXTRA_SYMBOLS variable but never pass it to recursive
               # kernel make. Only patch that exact declaration form. Do not
