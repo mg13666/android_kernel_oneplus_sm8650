@@ -169,14 +169,20 @@ jobs:
           KERNEL_SRC="$GITHUB_WORKSPACE/kernel"
           OUT_DIR="$GITHUB_WORKSPACE/kernel/out"
 
-          echo '--- Patch external module Makefiles for absolute M paths ---'
+          echo '--- Patch external Makefile/Kbuild paths for absolute M/src ---'
           python3 - <<'PY'
           from pathlib import Path
           root = Path('sm8650-modules')
-          for p in root.rglob('Makefile'):
+          files = list(root.rglob('Makefile')) + list(root.rglob('Kbuild'))
+          for p in files:
               s = p.read_text(errors='ignore')
               ns = s.replace('$(KERNEL_SRC)/$(M)', '$(M)')
               ns = ns.replace('$(KERNEL_SRC)/$(PWD)', '$(PWD)')
+              # With an absolute external M, Kbuild's $(src) is already an
+              # absolute path. Prefixing it with $(srctree) breaks includes,
+              # e.g. dataipa cannot find datarmnet-ext/mem/rmnet_mem.h.
+              ns = ns.replace('$(srctree)/$(src)', '$(src)')
+              ns = ns.replace('$(srctree)/$(M)', '$(M)')
               if ns != s:
                   p.write_text(ns)
                   print('patched', p)
