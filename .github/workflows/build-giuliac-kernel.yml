@@ -302,6 +302,22 @@ jobs:
                 rm -f Module.symvers modules.order *.ko *.mod *.mod.c *.mod.o .*.cmd
                 rm -rf .tmp_versions
               fi
+
+              build_jobs="$(nproc)"
+              if [ "$mod" = "qcom/opensource/video-driver" ]; then
+                # Its top Kbuild builds both msm_video/ and video/. Their
+                # ../-relative object paths can race under parallel Kbuild,
+                # leaving a missing .o.d/object. Remove failed partial output
+                # and serialize only this external module.
+                echo 'Cleaning partial video-driver output and using -j1'
+                find . -type f \( -name '*.o' -o -name '*.o.d' -o -name '*.ko' \
+                  -o -name '*.mod' -o -name '*.mod.c' -o -name '*.mod.o' \
+                  -o -name '.*.cmd' -o -name 'Module.symvers' \
+                  -o -name 'modules.order' \) -delete
+                rm -rf .tmp_versions
+                build_jobs=1
+              fi
+
               # Vendor wrapper Makefiles are inconsistent: mmrm exposes
               # "modules", most Qualcomm modules expose only "all", while
               # many Oplus directories are plain Kbuild Makefiles with no
@@ -324,7 +340,7 @@ jobs:
                   O="$OUT_DIR" \
                   TARGET_BOARD_PLATFORM=pineapple \
                   "${extra_args[@]}" \
-                  -j"$(nproc)" "$wrapper_target"
+                  -j"$build_jobs" "$wrapper_target"
               else
                 echo "Using direct Kbuild modules target"
                 make -C "$KERNEL_SRC" \
@@ -333,7 +349,7 @@ jobs:
                   O="$OUT_DIR" \
                   TARGET_BOARD_PLATFORM=pineapple \
                   "${extra_args[@]}" \
-                  -j"$(nproc)" modules
+                  -j"$build_jobs" modules
               fi
             )
 
