@@ -186,12 +186,21 @@ jobs:
             }
             (
               cd "$MODULE_ROOT/$mod"
+              extra_args=()
+              if [ "$mod" = "qcom/opensource/securemsm-kernel" ]; then
+                # securemsm-kernel's Makefile otherwise builds
+                # SSG_MODULE_ROOT as $(KERNEL_SRC)/$(M).  TARGET_MACHINE=ar-sg1
+                # selects the upstream path where SSG_MODULE_ROOT=$(M), which is
+                # required when M is an absolute external module directory.
+                extra_args+=(TARGET_MACHINE=ar-sg1)
+              fi
               make \
                 ARCH=arm64 LLVM=1 LLVM_IAS=1 \
                 KERNEL_SRC="$KERNEL_SRC" \
                 OUT_DIR="$OUT_DIR" \
                 O="$OUT_DIR" \
                 TARGET_BOARD_PLATFORM=pineapple \
+                "${extra_args[@]}" \
                 -j"$(nproc)" modules
             )
           done
