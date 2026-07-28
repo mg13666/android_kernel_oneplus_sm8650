@@ -18,6 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ env.STOCK_COMMIT }}
+          path: kernel
           fetch-depth: 1
 
       - name: Checkout matching modules dependency
@@ -30,14 +31,14 @@ jobs:
 
       - name: Verify exact source identity and fetch captured stock config
         run: |
-          HEAD="$(git rev-parse HEAD)"
+          HEAD="$(git -C kernel rev-parse HEAD)"
           echo "Kernel source HEAD: ${HEAD}"
           test "${HEAD}" = "${STOCK_COMMIT}"
-          git show -s --format=fuller HEAD
-          curl -fL -o stock-running.config \
+          git -C kernel show -s --format=fuller HEAD
+          curl -fL -o kernel/stock-running.config \
             https://raw.githubusercontent.com/mg13666/android_kernel_oneplus_sm8650/5376936d65d9434992178933c08885129aed2591/stock-running.config
-          test "$(wc -l < stock-running.config)" = 8687
-          sha256sum stock-running.config
+          test "$(wc -l < kernel/stock-running.config)" = 8687
+          sha256sum kernel/stock-running.config
 
       - name: Install dependencies
         run: |
@@ -58,26 +59,27 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          path = Path('certs/extract-cert.c')
+          path = Path('kernel/certs/extract-cert.c')
           text = path.read_text()
           text = text.replace('#ifdef USE_PKCS11_ENGINE\nstatic const char *key_pass;\n#endif', 'static const char *key_pass;')
           text = text.replace('#ifdef USE_PKCS11_ENGINE\n\tkey_pass = getenv("KBUILD_SIGN_PIN");\n#endif', '\tkey_pass = getenv("KBUILD_SIGN_PIN");')
           path.write_text(text)
           PY
-          git diff -- certs/extract-cert.c
+          git -C kernel diff -- certs/extract-cert.c
 
-      - name: Restore external Kconfig symlink targets
+      - name: Verify original multi-repository symlinks
         run: |
           test "$(git -C sm8650-modules rev-parse HEAD)" = "${MODULES_COMMIT}"
-          rm -f drivers/base/kernelFwUpdate drivers/base/touchpanel_notify
-          ln -s ../../sm8650-modules/oplus/kernel/touchpanel/kernelFwUpdate drivers/base/kernelFwUpdate
-          ln -s ../../sm8650-modules/oplus/kernel/touchpanel/touchpanel_notify drivers/base/touchpanel_notify
-          test -f drivers/base/kernelFwUpdate/Kconfig
-          test -f drivers/base/touchpanel_notify/Kconfig
-          readlink -f drivers/base/kernelFwUpdate
-          readlink -f drivers/base/touchpanel_notify
+          test -L kernel/drivers/base/kernelFwUpdate
+          test -L kernel/drivers/misc/vibrator
+          test -f kernel/drivers/base/kernelFwUpdate/Kconfig
+          test -f kernel/drivers/base/touchpanel_notify/Kconfig
+          test -f kernel/drivers/misc/vibrator/aw8697_haptic/Kconfig
+          readlink -f kernel/drivers/base/kernelFwUpdate
+          readlink -f kernel/drivers/misc/vibrator
 
       - name: Configure exact stock config
+        working-directory: kernel
         run: |
           export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
           printf '%s' '-g638ecc425319' > .scmversion
@@ -119,6 +121,7 @@ jobs:
           test "${RELEASE}" = "${EXPECTED_KERNEL_RELEASE}"
 
       - name: Build clean Image and in-tree modules
+        working-directory: kernel
         run: |
           export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CONFIG_OPLUS_DEVICE_DTBS=y CONFIG_GIULIA_DTB=y CONFIG_GIULIAC_DTB=y -j"$(nproc)" Image modules
@@ -127,7 +130,7 @@ jobs:
 
       - name: Verify exact Image
         run: |
-          IMAGE=out/arch/arm64/boot/Image
+          IMAGE=kernel/out/arch/arm64/boot/Image
           file "$IMAGE"
           VERSION_LINE="$(strings "$IMAGE" | grep -m1 'Linux version')"
           echo "$VERSION_LINE"
@@ -136,10 +139,10 @@ jobs:
           SIZE="$(stat -c %s "$IMAGE")"
           echo "Image size: ${SIZE}"
           test "${SIZE}" = 35576320
-          sha256sum "$IMAGE" out/.config out/Module.symvers | tee exact-stock-SHA256SUMS.txt
+          sha256sum "$IMAGE" kernel/out/.config kernel/out/Module.symvers | tee exact-stock-SHA256SUMS.txt
           cp "$IMAGE" Image
-          cp out/.config kernel.config
-          cp out/Module.symvers Module.symvers
+          cp kernel/out/.config kernel.config
+          cp kernel/out/Module.symvers Module.symvers
           printf '%s\n' "$STOCK_COMMIT" > source-commit.txt
 
       - name: Upload exact stock commit artifact
