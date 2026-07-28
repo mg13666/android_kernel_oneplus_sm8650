@@ -1,0 +1,137 @@
+name: Build giuliac exact stock commit kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      STOCK_COMMIT: 638ecc42531912963b2a0d9eddf6b1ae3be9bb37
+      EXPECTED_KERNEL_RELEASE: 6.1.174-g638ecc425319
+      CLANG_VERSION: r563880c
+      CLANG_COMMIT: f8439f0628d799092dd07df440a6334cab28939c
+
+    steps:
+      - name: Checkout exact stock kernel commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.STOCK_COMMIT }}
+          fetch-depth: 1
+
+      - name: Verify exact source identity and fetch captured stock config
+        run: |
+          HEAD="$(git rev-parse HEAD)"
+          echo "Kernel source HEAD: ${HEAD}"
+          test "${HEAD}" = "${STOCK_COMMIT}"
+          git show -s --format=fuller HEAD
+          curl -fL -o stock-running.config \
+            https://raw.githubusercontent.com/mg13666/android_kernel_oneplus_sm8650/5376936d65d9434992178933c08885129aed2591/stock-running.config
+          test "$(wc -l < stock-running.config)" = 8687
+          sha256sum stock-running.config
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential curl file flex git libelf-dev libssl-dev python3 rsync unzip zip dwarves xz-utils
+
+      - name: Install exact LineageOS clang
+        run: |
+          mkdir -p "toolchain/${CLANG_VERSION}"
+          curl -fL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${CLANG_COMMIT}/clang-${CLANG_VERSION}.tar.gz" | tar -xz -C "toolchain/${CLANG_VERSION}"
+          toolchain/${CLANG_VERSION}/bin/clang --version | tee clang-version.txt
+          grep -q 'Android (14054515' clang-version.txt
+          grep -q 'clang version 21.0.0' clang-version.txt
+          grep -q 'r563880c' toolchain/${CLANG_VERSION}/AndroidVersion.txt
+          test -f toolchain/${CLANG_VERSION}/manifest_14054515.xml
+
+      - name: Apply host-only extract-cert compatibility fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('certs/extract-cert.c')
+          text = path.read_text()
+          text = text.replace('#ifdef USE_PKCS11_ENGINE\nstatic const char *key_pass;\n#endif', 'static const char *key_pass;')
+          text = text.replace('#ifdef USE_PKCS11_ENGINE\n\tkey_pass = getenv("KBUILD_SIGN_PIN");\n#endif', '\tkey_pass = getenv("KBUILD_SIGN_PIN");')
+          path.write_text(text)
+          PY
+          git diff -- certs/extract-cert.c
+
+      - name: Configure exact stock config
+        run: |
+          export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
+          printf '%s' '-g638ecc425319' > .scmversion
+          rm -rf out
+          FLAGS=(O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CONFIG_OPLUS_DEVICE_DTBS=y CONFIG_GIULIA_DTB=y CONFIG_GIULIAC_DTB=y)
+          make "${FLAGS[@]}" gki_defconfig vendor/pineapple_GKI.config vendor/oplus/pineapple_GKI.config
+          for option in BRIDGE_NETFILTER CGROUP_DEVICE CGROUP_PIDS CHECKPOINT_RESTORE NETFILTER_XT_MATCH_ADDRTYPE PID_NS PROC_CHILDREN USER_NS; do
+            scripts/config --file out/.config --disable "$option"
+          done
+          make "${FLAGS[@]}" olddefconfig
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          def parse(path):
+              result = {}
+              for line in Path(path).read_text().splitlines():
+                  match = re.match(r'CONFIG_([A-Za-z0-9_]+)=(.*)', line)
+                  if match:
+                      result[match.group(1)] = match.group(2)
+                      continue
+                  match = re.match(r'# CONFIG_([A-Za-z0-9_]+) is not set', line)
+                  if match:
+                      result[match.group(1)] = 'n'
+              return result
+          stock = parse('stock-running.config')
+          built = parse('out/.config')
+          allowed = {'RUST_IS_AVAILABLE', 'NETFILTER_XT_MATCH_PHYSDEV'}
+          diff = [(key, stock.get(key, '<absent>'), built.get(key, '<absent>'))
+                  for key in sorted(set(stock) | set(built))
+                  if stock.get(key) != built.get(key) and key not in allowed]
+          print('Unexpected config differences:', len(diff))
+          for row in diff:
+              print(*row, sep=': ')
+          if diff:
+              raise SystemExit(1)
+          PY
+          RELEASE="$(make -s "${FLAGS[@]}" kernelrelease)"
+          echo "Kernel release: ${RELEASE}"
+          test "${RELEASE}" = "${EXPECTED_KERNEL_RELEASE}"
+
+      - name: Build clean Image and symbol table
+        run: |
+          export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CONFIG_OPLUS_DEVICE_DTBS=y CONFIG_GIULIA_DTB=y CONFIG_GIULIAC_DTB=y -j"$(nproc)" Image modules_prepare
+          test -s out/arch/arm64/boot/Image
+          test -s out/Module.symvers
+
+      - name: Verify exact Image
+        run: |
+          IMAGE=out/arch/arm64/boot/Image
+          file "$IMAGE"
+          VERSION_LINE="$(strings "$IMAGE" | grep -m1 'Linux version')"
+          echo "$VERSION_LINE"
+          printf '%s\n' "$VERSION_LINE" | grep -Fq "Linux version ${EXPECTED_KERNEL_RELEASE} "
+          printf '%s\n' "$VERSION_LINE" | grep -Fq 'Android (14054515, +pgo, +bolt, +lto, +mlgo, based on r563880c) clang version 21.0.0'
+          SIZE="$(stat -c %s "$IMAGE")"
+          echo "Image size: ${SIZE}"
+          test "${SIZE}" = 35576320
+          sha256sum "$IMAGE" out/.config out/Module.symvers | tee exact-stock-SHA256SUMS.txt
+          cp "$IMAGE" Image
+          cp out/.config kernel.config
+          cp out/Module.symvers Module.symvers
+          printf '%s\n' "$STOCK_COMMIT" > source-commit.txt
+
+      - name: Upload exact stock commit artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: giuliac-exact-stock-commit-r563880c
+          path: |
+            Image
+            kernel.config
+            Module.symvers
+            source-commit.txt
+            clang-version.txt
+            exact-stock-SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
