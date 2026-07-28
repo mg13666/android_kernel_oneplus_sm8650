@@ -229,6 +229,10 @@ jobs:
                 # required when M is an absolute external module directory.
                 extra_args+=(TARGET_MACHINE=ar-sg1)
               fi
+              if [ "$mod" = "qcom/opensource/mm-drivers/msm_ext_display" ]; then
+                rm -f Module.symvers modules.order *.ko *.mod *.mod.c *.mod.o .*.cmd
+                rm -rf .tmp_versions
+              fi
               make \
                 ARCH=arm64 LLVM=1 LLVM_IAS=1 \
                 KERNEL_SRC="$KERNEL_SRC" \
@@ -242,15 +246,17 @@ jobs:
             if [ "$mod" = "qcom/opensource/mm-drivers/msm_ext_display" ]; then
               expected="$MODULE_ROOT/qcom/opensource/mm-drivers/msm_ext_display/Module.symvers"
               if [ ! -s "$expected" ]; then
-                found="$(find "$MODULE_ROOT/qcom/opensource/mm-drivers/msm_ext_display" "$OUT_DIR" -name Module.symvers -type f -size +0c 2>/dev/null | head -n1 || true)"
-                if [ -n "$found" ]; then
-                  cp -f "$found" "$expected"
-                  echo "Copied msm_ext_display Module.symvers from $found"
-                else
-                  : > "$expected"
-                  echo "Created empty msm_ext_display Module.symvers for dependent modpost"
-                fi
+                echo "ERROR: msm_ext_display did not produce Module.symvers"
+                find "$MODULE_ROOT/qcom/opensource/mm-drivers/msm_ext_display" -maxdepth 3 -type f \( -name '*.ko' -o -name 'Module.symvers' -o -name 'modules.order' \) -print || true
+                exit 1
               fi
+              for sym in msm_ext_disp_register_audio_codec msm_ext_disp_select_audio_codec; do
+                grep -q "[[:space:]]$sym[[:space:]]" "$expected" || {
+                  echo "ERROR: $expected is missing required symbol $sym"
+                  cat "$expected" || true
+                  exit 1
+                }
+              done
             fi
           done
 
