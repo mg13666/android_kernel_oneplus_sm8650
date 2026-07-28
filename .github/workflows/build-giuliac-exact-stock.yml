@@ -11,12 +11,21 @@ jobs:
       EXPECTED_KERNEL_RELEASE: 6.1.174-g638ecc425319
       CLANG_VERSION: r563880c
       CLANG_COMMIT: f8439f0628d799092dd07df440a6334cab28939c
+      MODULES_COMMIT: ec04e4f8d5c96d6beb41626d3e5af4f10e0ac189
 
     steps:
       - name: Checkout exact stock kernel commit
         uses: actions/checkout@v4
         with:
           ref: ${{ env.STOCK_COMMIT }}
+          fetch-depth: 1
+
+      - name: Checkout matching modules dependency
+        uses: actions/checkout@v4
+        with:
+          repository: LineageOS/android_kernel_oneplus_sm8650-modules
+          ref: ${{ env.MODULES_COMMIT }}
+          path: sm8650-modules
           fetch-depth: 1
 
       - name: Verify exact source identity and fetch captured stock config
@@ -56,6 +65,17 @@ jobs:
           path.write_text(text)
           PY
           git diff -- certs/extract-cert.c
+
+      - name: Restore external Kconfig symlink targets
+        run: |
+          test "$(git -C sm8650-modules rev-parse HEAD)" = "${MODULES_COMMIT}"
+          rm -f drivers/base/kernelFwUpdate drivers/base/touchpanel_notify
+          ln -s ../../sm8650-modules/oplus/kernel/touchpanel/kernelFwUpdate drivers/base/kernelFwUpdate
+          ln -s ../../sm8650-modules/oplus/kernel/touchpanel/touchpanel_notify drivers/base/touchpanel_notify
+          test -f drivers/base/kernelFwUpdate/Kconfig
+          test -f drivers/base/touchpanel_notify/Kconfig
+          readlink -f drivers/base/kernelFwUpdate
+          readlink -f drivers/base/touchpanel_notify
 
       - name: Configure exact stock config
         run: |
@@ -98,10 +118,10 @@ jobs:
           echo "Kernel release: ${RELEASE}"
           test "${RELEASE}" = "${EXPECTED_KERNEL_RELEASE}"
 
-      - name: Build clean Image and symbol table
+      - name: Build clean Image and in-tree modules
         run: |
           export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CONFIG_OPLUS_DEVICE_DTBS=y CONFIG_GIULIA_DTB=y CONFIG_GIULIAC_DTB=y -j"$(nproc)" Image modules_prepare
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CONFIG_OPLUS_DEVICE_DTBS=y CONFIG_GIULIA_DTB=y CONFIG_GIULIAC_DTB=y -j"$(nproc)" Image modules
           test -s out/arch/arm64/boot/Image
           test -s out/Module.symvers
 
