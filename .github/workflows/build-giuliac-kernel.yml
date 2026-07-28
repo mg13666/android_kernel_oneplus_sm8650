@@ -155,8 +155,14 @@ jobs:
             CONFIG_GIULIAC_DTB=y
           )
 
-          echo '--- Build in-tree modules ---'
-          make -C kernel "${COMMON_FLAGS[@]}" -j"$(nproc)" modules
+          echo '--- Build or reuse in-tree modules ---'
+          if [ -s kernel/out/Module.symvers ] \
+             && [ -s kernel/out/modules.order ] \
+             && find kernel/out -type f -name '*.ko' -print -quit | grep -q .; then
+            echo 'Reusing cached in-tree modules'
+          else
+            make -C kernel "${COMMON_FLAGS[@]}" -j"$(nproc)" modules
+          fi
 
           echo '--- Build external modules ---'
           MODULE_ROOT="$GITHUB_WORKSPACE/sm8650-modules"
@@ -233,6 +239,12 @@ jobs:
               echo "ERROR: missing external module path: $mod"
               exit 1
             }
+            if [ -s "$MODULE_ROOT/$mod/Module.symvers" ] \
+               && find "$MODULE_ROOT/$mod" -type f -name '*.ko' -print -quit | grep -q .; then
+              echo "Reusing cached external module: $mod"
+              touch "$MODULE_ROOT/$mod/.operit-build-complete"
+              continue
+            fi
             (
               cd "$MODULE_ROOT/$mod"
               extra_args=()
