@@ -343,7 +343,9 @@ jobs:
               # "modules", most Qualcomm modules expose only "all", while
               # many Oplus directories are plain Kbuild Makefiles with no
               # wrapper target. Select the correct entry point automatically.
-              if grep -Eq '^modules[[:space:]]*:' Makefile; then
+              if grep -Eq '^[^#]*\bmodules\b[^:]*:' Makefile; then
+                # Also matches grouped targets such as:
+                #   modules modules_install clean:
                 wrapper_target=modules
               elif grep -Eq '^all[[:space:]]*:' Makefile; then
                 wrapper_target=all
@@ -371,6 +373,11 @@ jobs:
                   TARGET_BOARD_PLATFORM=pineapple \
                   "${extra_args[@]}" \
                   -j"$build_jobs" modules
+              fi
+
+              if ! find . -type f -name '*.ko' -print -quit | grep -q .; then
+                echo "ERROR: external module produced no .ko: $mod"
+                exit 1
               fi
             )
 
