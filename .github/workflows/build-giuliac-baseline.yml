@@ -1,1 +1,579 @@
-__CONTENT_FROM_LOCAL_NOT_SUPPORTED__
+name: Build giuliac LineageOS stock-config baseline kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      EXPECTED_KERNEL_RELEASE: 6.1.174-g638ecc425319
+      AK3_ZIP: AnyKernel3-LineageOS-6.1.174-Baseline-Ace5.zip
+      CLANG_VERSION: r563880c
+      CLANG_COMMIT: f8439f0628d799092dd07df440a6334cab28939c
+
+    steps:
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          path: kernel
+          fetch-depth: 1
+
+      - name: Checkout sm8650 modules
+        uses: actions/checkout@v4
+        with:
+          repository: LineageOS/android_kernel_oneplus_sm8650-modules
+          ref: lineage-23.2
+          path: sm8650-modules
+          fetch-depth: 1
+
+      - name: Restore exact clang cache
+        uses: actions/cache/restore@v4
+        with:
+          path: toolchain/${{ env.CLANG_VERSION }}
+          key: clang-${{ env.CLANG_VERSION }}-${{ env.CLANG_COMMIT }}-${{ github.run_id }}
+          restore-keys: |
+            clang-${{ env.CLANG_VERSION }}-${{ env.CLANG_COMMIT }}-
+
+      - name: Restore incremental build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            kernel/out
+            sm8650-modules
+          key: giuliac-baseline-r563880c-${{ github.run_id }}
+          restore-keys: |
+            giuliac-baseline-r563880c-
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl file flex git libelf-dev \
+            libssl-dev python3 rsync unzip zip dwarves xz-utils
+
+      - name: Install exact LineageOS clang-r563880c build 14054515
+        run: |
+          if [ ! -x "toolchain/${CLANG_VERSION}/bin/clang" ]; then
+            mkdir -p "toolchain/${CLANG_VERSION}"
+            curl -fL \
+              "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${CLANG_COMMIT}/clang-${CLANG_VERSION}.tar.gz" \
+              | tar -xz -C "toolchain/${CLANG_VERSION}"
+          fi
+          "toolchain/${CLANG_VERSION}/bin/clang" --version | tee clang-version.txt
+          grep -q 'clang version 21.0.0' clang-version.txt
+          grep -q 'r563880c' "toolchain/${CLANG_VERSION}/AndroidVersion.txt"
+          test -f "toolchain/${CLANG_VERSION}/manifest_14054515.xml"
+
+      - name: Configure kernel from LineageOS device settings
+        run: |
+          cd kernel
+          export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
+
+          # This source tree's scripts/setlocalversion explicitly prefers
+          # .scmversion over Git metadata. It therefore produces the exact
+          # release used by the installed LineageOS kernel without a '+' suffix.
+          printf '%s' '-g638ecc425319' > .scmversion
+
+          MAKE_FLAGS=(
+            O=out
+            ARCH=arm64
+            LLVM=1
+            LLVM_IAS=1
+            CONFIG_OPLUS_DEVICE_DTBS=y
+            CONFIG_GIULIA_DTB=y
+            CONFIG_GIULIAC_DTB=y
+          )
+
+          # Baseline diagnostic build: always regenerate from clean output and
+          # restore every run32-only option to the values from /proc/config.gz.
+          rm -rf out
+          make "${MAKE_FLAGS[@]}" \
+            gki_defconfig \
+            vendor/pineapple_GKI.config \
+            vendor/oplus/pineapple_GKI.config
+
+          for option in \
+            BRIDGE_NETFILTER CGROUP_DEVICE CGROUP_PIDS CHECKPOINT_RESTORE \
+            NETFILTER_XT_MATCH_ADDRTYPE PID_NS PROC_CHILDREN USER_NS; do
+            scripts/config --file out/.config --disable "$option"
+          done
+          make "${MAKE_FLAGS[@]}" olddefconfig
+
+          grep -q '^CONFIG_LOCALVERSION_AUTO=y$' out/.config
+          grep -Fq 'based on r563880c) clang version 21.0.0' out/.config
+          for option in \
+            BRIDGE_NETFILTER CGROUP_DEVICE CGROUP_PIDS CHECKPOINT_RESTORE \
+            NETFILTER_XT_MATCH_ADDRTYPE PID_NS PROC_CHILDREN USER_NS; do
+            grep -q "^# CONFIG_${option} is not set$" out/.config || {
+              echo "ERROR: baseline requires CONFIG_${option}=n"
+              exit 1
+            }
+          done
+
+          # Compare against the captured stock /proc/config.gz committed beside
+          # this workflow. Only toolchain capability markers may differ.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          def parse(path):
+              d = {}
+              for line in Path(path).read_text().splitlines():
+                  m = re.match(r'CONFIG_([A-Za-z0-9_]+)=(.*)', line)
+                  if m:
+                      d[m.group(1)] = m.group(2)
+                      continue
+                  m = re.match(r'# CONFIG_([A-Za-z0-9_]+) is not set', line)
+                  if m:
+                      d[m.group(1)] = 'n'
+              return d
+          stock = parse('stock-running.config')
+          built = parse('out/.config')
+          allowed = {'RUST_IS_AVAILABLE', 'NETFILTER_XT_MATCH_PHYSDEV'}
+          diff = [(k, stock.get(k, '<absent>'), built.get(k, '<absent>'))
+                  for k in sorted(set(stock) | set(built))
+                  if stock.get(k) != built.get(k) and k not in allowed]
+          print('Unexpected baseline config differences:', len(diff))
+          for row in diff:
+              print(*row, sep=': ')
+          if diff:
+              raise SystemExit(1)
+          PY
+
+          RELEASE="$(make -s "${MAKE_FLAGS[@]}" kernelrelease)"
+          echo "Kernel release: ${RELEASE}"
+          test "${RELEASE}" = "${EXPECTED_KERNEL_RELEASE}" || {
+            echo "ERROR: expected ${EXPECTED_KERNEL_RELEASE}, got ${RELEASE}"
+            exit 1
+          }
+
+          echo '--- Stock-config baseline verification ---'
+          grep -E 'CONFIG_(LOCALVERSION|LOCALVERSION_AUTO|UTS_NS|IPC_NS|PID_NS|USER_NS|NET_NS|CGROUP_DEVICE|CGROUP_PIDS|CHECKPOINT_RESTORE|BRIDGE_NETFILTER|NETFILTER_XT_MATCH_ADDRTYPE|OVERLAY_FS|VETH|TUN|BRIDGE)=' out/.config || true
+
+      - name: Build Image with project clang
+        run: |
+          cd kernel
+          export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
+          IMAGE=out/arch/arm64/boot/Image
+          if [ -s "$IMAGE" ] && strings "$IMAGE" | grep -m1 'Linux version' | grep -Fq "Linux version ${EXPECTED_KERNEL_RELEASE} "; then
+            echo 'Reusing cached Image'
+          else
+            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+              CONFIG_OPLUS_DEVICE_DTBS=y \
+              CONFIG_GIULIA_DTB=y \
+              CONFIG_GIULIAC_DTB=y \
+              -j"$(nproc)" Image
+          fi
+
+      - name: Build matching in-tree and external modules
+        id: build_modules
+        continue-on-error: true
+        run: |
+          export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
+          ln -sfn "$GITHUB_WORKSPACE/sm8650-modules" "$GITHUB_WORKSPACE/kernel/sm8650-modules"
+
+          COMMON_FLAGS=(
+            O=out
+            ARCH=arm64
+            LLVM=1
+            LLVM_IAS=1
+            CONFIG_OPLUS_DEVICE_DTBS=y
+            CONFIG_GIULIA_DTB=y
+            CONFIG_GIULIAC_DTB=y
+          )
+
+          echo '--- Build or reuse in-tree modules ---'
+          if [ -s kernel/out/Module.symvers ] \
+             && [ -s kernel/out/modules.order ] \
+             && find kernel/out -type f -name '*.ko' -print -quit | grep -q .; then
+            echo 'Reusing cached in-tree modules'
+          else
+            make -C kernel "${COMMON_FLAGS[@]}" -j"$(nproc)" modules
+          fi
+
+          echo '--- Build external modules ---'
+          MODULE_ROOT="$GITHUB_WORKSPACE/sm8650-modules"
+          KERNEL_SRC="$GITHUB_WORKSPACE/kernel"
+          OUT_DIR="$GITHUB_WORKSPACE/kernel/out"
+
+          echo '--- Patch external Makefile/Kbuild paths for absolute M/src ---'
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path('sm8650-modules')
+          files = list(root.rglob('Makefile')) + list(root.rglob('Kbuild'))
+          for p in files:
+              s = p.read_text(errors='ignore')
+              ns = s.replace('$(KERNEL_SRC)/$(M)', '$(M)')
+              ns = ns.replace('$(KERNEL_SRC)/$(PWD)', '$(PWD)')
+              # Remove the exact line injected by older workflow revisions.
+              # Cached module trees may retain it even after the matching
+              # rule is fixed; qcacld then ends with KBUILD_EXTRA_SYMBOLS="".
+              ns = ns.replace(
+                  'KBUILD_OPTIONS += KBUILD_EXTRA_SYMBOLS="$(KBUILD_EXTRA_SYMBOLS)"\n',
+                  '')
+              # With an absolute external M, Kbuild's $(src) is already an
+              # absolute path. Prefixing it with $(srctree) breaks includes,
+              # e.g. dataipa cannot find datarmnet-ext/mem/rmnet_mem.h.
+              ns = ns.replace('$(srctree)/$(src)', '$(src)')
+              ns = ns.replace('$(srctree)/$(M)', '$(M)')
+
+              # qcacld is invoked through profile aliases such as .kiwi_v2.
+              # Relative symbol paths based on $(M) can fail through those
+              # aliases even though the dependency files exist. Anchor both
+              # dependencies at kernel/out, as other vendor wrappers do.
+              if p.as_posix().endswith('/wlan/qcacld-3.0/Makefile'):
+                  ns = ns.replace(
+                      'KBUILD_EXTRA_SYMBOLS=$(M)/../../../dataipa/drivers/platform/msm/Module.symvers',
+                      'KBUILD_EXTRA_SYMBOLS=$(OUT_DIR)/../sm8650-modules/qcom/opensource/dataipa/drivers/platform/msm/Module.symvers')
+                  ns = ns.replace(
+                      'KBUILD_EXTRA_SYMBOLS+=$(M)/../../platform/Module.symvers',
+                      'KBUILD_EXTRA_SYMBOLS+=$(OUT_DIR)/../sm8650-modules/qcom/opensource/wlan/platform/Module.symvers')
+
+              # Several vendor wrappers declare a standalone
+              # KBUILD_EXTRA_SYMBOLS variable but never pass it to recursive
+              # kernel make. Only patch that exact declaration form. Do not
+              # touch wrappers such as qcacld which already put symbol-table
+              # assignments inside a multiline KBUILD_OPTIONS value.
+              import re
+              standalone_extra_symbols = re.search(
+                  r'(?m)^KBUILD_EXTRA_SYMBOLS\s*[:+?]?=', ns)
+              if p.name == 'Makefile' \
+                 and standalone_extra_symbols \
+                 and 'KBUILD_OPTIONS += KBUILD_EXTRA_SYMBOLS=' not in ns \
+                 and 'KBUILD_OPTIONS+=KBUILD_EXTRA_SYMBOLS=' not in ns:
+                  lines = [line.replace(' $(KBUILD_EXTRA_SYMBOLS)', '')
+                           if '$(MAKE)' in line else line
+                           for line in ns.splitlines()]
+                  insert_at = next(
+                      (i for i, line in enumerate(lines)
+                       if re.match(r'^[A-Za-z0-9_%./-]+\s*:(?!=)', line)),
+                      len(lines))
+                  lines[insert_at:insert_at] = [
+                      'KBUILD_OPTIONS += KBUILD_EXTRA_SYMBOLS="$(KBUILD_EXTRA_SYMBOLS)"',
+                      ''
+                  ]
+                  ns = '\n'.join(lines) + ('\n' if ns.endswith('\n') else '')
+
+              if ns != s:
+                  p.write_text(ns)
+                  print('patched', p)
+          PY
+
+          modules=(
+            qcom/opensource/mmrm-driver
+            qcom/opensource/mm-drivers/hw_fence
+            qcom/opensource/mm-drivers/msm_ext_display
+            qcom/opensource/mm-drivers/sync_fence
+            qcom/opensource/securemsm-kernel
+            qcom/opensource/audio-kernel
+            qcom/opensource/synx-kernel
+            qcom/opensource/camera-kernel
+            qcom/opensource/datarmnet-ext/mem
+            qcom/opensource/dataipa/drivers/platform/msm
+            qcom/opensource/datarmnet/core
+            qcom/opensource/datarmnet-ext/aps
+            qcom/opensource/datarmnet-ext/offload
+            qcom/opensource/datarmnet-ext/shs
+            qcom/opensource/datarmnet-ext/perf
+            qcom/opensource/datarmnet-ext/perf_tether
+            qcom/opensource/datarmnet-ext/sch
+            qcom/opensource/datarmnet-ext/wlan
+            qcom/opensource/display-drivers/msm
+            qcom/opensource/dsp-kernel
+            qcom/opensource/eva-kernel
+            qcom/opensource/video-driver
+            qcom/opensource/graphics-kernel
+            qcom/opensource/wlan/platform
+            qcom/opensource/wlan/qcacld-3.0/.kiwi_v2
+            qcom/opensource/wlan/qcacld-3.0/.qca6750
+            qcom/opensource/bt-kernel
+            qcom/opensource/spu-kernel
+            qcom/opensource/mm-sys-kernel/ubwcp
+            nxp/opensource/driver
+            oplus/hardware/radio/kernel/mdmfeature
+            oplus/kernel/cpu/thermal
+            oplus/kernel/device_info/pogo_keyboard
+            oplus/kernel/device_info/tri_state_key
+            oplus/kernel/dfr
+            oplus/kernel/graphics
+            oplus/kernel/network/oplus_network_oem_qmi
+            oplus/kernel/network/oplus_network_esim
+            oplus/kernel/network/oplus_network_sim_detect
+            oplus/kernel/network/oplus_rf_cable_monitor
+            oplus/kernel/touchpanel/oplus_touchscreen_v2/touch_custom
+            oplus/kernel/touchpanel/oplus_touchscreen_v2
+            oplus/kernel/touchpanel/synaptics_hbp
+            oplus/kernel/tp/hbp/hbp
+            oplus/secure/biometrics/fingerprints/bsp/uff/driver
+            oplus/secure/common/bsp/drivers/oplus_secure_common
+            oplus/sensor/kernel/oplus_consumer_ir
+            oplus/sensor/kernel/qcom/sensor
+          )
+
+          for mod in "${modules[@]}"; do
+            echo "=== external module: $mod ==="
+            test -d "$MODULE_ROOT/$mod" || {
+              echo "ERROR: missing external module path: $mod"
+              exit 1
+            }
+            if [ -s "$MODULE_ROOT/$mod/Module.symvers" ] \
+               && find "$MODULE_ROOT/$mod" -type f -name '*.ko' -print -quit | grep -q .; then
+              echo "Reusing cached external module: $mod"
+              touch "$MODULE_ROOT/$mod/.operit-build-complete"
+              continue
+            fi
+            (
+              cd "$MODULE_ROOT/$mod"
+              extra_args=()
+              if [ "$mod" = "qcom/opensource/securemsm-kernel" ]; then
+                # securemsm-kernel's Makefile otherwise builds
+                # SSG_MODULE_ROOT as $(KERNEL_SRC)/$(M).  TARGET_MACHINE=ar-sg1
+                # selects the upstream path where SSG_MODULE_ROOT=$(M), which is
+                # required when M is an absolute external module directory.
+                extra_args+=(TARGET_MACHINE=ar-sg1)
+              fi
+              if [ "$mod" = "qcom/opensource/camera-kernel" ]; then
+                camera_symvers=(
+                  "$MODULE_ROOT/qcom/opensource/mmrm-driver/Module.symvers"
+                  "$MODULE_ROOT/qcom/opensource/securemsm-kernel/Module.symvers"
+                  "$MODULE_ROOT/qcom/opensource/synx-kernel/Module.symvers"
+                )
+                for symvers in "${camera_symvers[@]}"; do
+                  test -s "$symvers" || {
+                    echo "ERROR: camera dependency symvers missing: $symvers"
+                    exit 1
+                  }
+                done
+                extra_args+=("KBUILD_EXTRA_SYMBOLS=${camera_symvers[*]}")
+              fi
+              if [ "$mod" = "qcom/opensource/mm-drivers/msm_ext_display" ]; then
+                rm -f Module.symvers modules.order *.ko *.mod *.mod.c *.mod.o .*.cmd
+                rm -rf .tmp_versions
+              fi
+
+              build_jobs="$(nproc)"
+              if [ "$mod" = "qcom/opensource/video-driver" ]; then
+                # Its top Kbuild builds both msm_video/ and video/. Their
+                # ../-relative object paths can race under parallel Kbuild,
+                # leaving a missing .o.d/object. Remove failed partial output
+                # and serialize only this external module.
+                echo 'Cleaning partial video-driver output and using -j1'
+                find . -type f \( -name '*.o' -o -name '*.o.d' -o -name '*.ko' \
+                  -o -name '*.mod' -o -name '*.mod.c' -o -name '*.mod.o' \
+                  -o -name '.*.cmd' -o -name 'Module.symvers' \
+                  -o -name 'modules.order' \) -delete
+                rm -rf .tmp_versions
+                build_jobs=1
+              fi
+
+              # Vendor wrapper Makefiles are inconsistent: mmrm exposes
+              # "modules", most Qualcomm modules expose only "all", while
+              # many Oplus directories are plain Kbuild Makefiles with no
+              # wrapper target. Select the correct entry point automatically.
+              if grep -Eq '^[^#]*\bmodules\b[^:]*:' Makefile; then
+                # Also matches grouped targets such as:
+                #   modules modules_install clean:
+                wrapper_target=modules
+              elif grep -Eq '^all[[:space:]]*:' Makefile; then
+                wrapper_target=all
+              else
+                wrapper_target=
+              fi
+
+              if [ -n "$wrapper_target" ]; then
+                echo "Using vendor wrapper target: $wrapper_target"
+                make \
+                  M="$PWD" \
+                  ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                  KERNEL_SRC="$KERNEL_SRC" \
+                  OUT_DIR="$OUT_DIR" \
+                  O="$OUT_DIR" \
+                  TARGET_BOARD_PLATFORM=pineapple \
+                  "${extra_args[@]}" \
+                  -j"$build_jobs" "$wrapper_target"
+              else
+                echo "Using direct Kbuild modules target"
+                make -C "$KERNEL_SRC" \
+                  M="$PWD" \
+                  ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                  O="$OUT_DIR" \
+                  TARGET_BOARD_PLATFORM=pineapple \
+                  "${extra_args[@]}" \
+                  -j"$build_jobs" modules
+              fi
+
+              if ! find . -type f -name '*.ko' -print -quit | grep -q .; then
+                echo "ERROR: external module produced no .ko: $mod"
+                exit 1
+              fi
+            )
+
+            if [ "$mod" = "qcom/opensource/mm-drivers/msm_ext_display" ]; then
+              expected="$MODULE_ROOT/qcom/opensource/mm-drivers/msm_ext_display/Module.symvers"
+              if [ ! -s "$expected" ]; then
+                echo "ERROR: msm_ext_display did not produce Module.symvers"
+                find "$MODULE_ROOT/qcom/opensource/mm-drivers/msm_ext_display" -maxdepth 3 -type f \( -name '*.ko' -o -name 'Module.symvers' -o -name 'modules.order' \) -print || true
+                exit 1
+              fi
+              for sym in msm_ext_disp_register_audio_codec msm_ext_disp_select_audio_codec; do
+                grep -q "[[:space:]]$sym[[:space:]]" "$expected" || {
+                  echo "ERROR: $expected is missing required symbol $sym"
+                  cat "$expected" || true
+                  exit 1
+                }
+              done
+            fi
+          done
+
+          mkdir -p module-package/all-ko
+          find kernel/out sm8650-modules -type f -name '*.ko' -print0 | \
+            xargs -0 -I{} cp -f {} module-package/all-ko/
+          find module-package/all-ko -type f -name '*.ko' | sort > module-package/all-ko.list
+          wc -l module-package/all-ko.list
+          while read -r ko; do
+            strings "$ko" | grep -m1 'vermagic=6.1.174-g638ecc425319' >/dev/null || {
+              echo "ERROR: bad vermagic: $ko"
+              strings "$ko" | grep -m1 vermagic || true
+              exit 1
+            }
+          done < module-package/all-ko.list
+          tar -C module-package -czf matching-modules-baseline-r563880c.tar.gz all-ko all-ko.list
+
+      - name: Save exact clang cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: toolchain/${{ env.CLANG_VERSION }}
+          key: clang-${{ env.CLANG_VERSION }}-${{ env.CLANG_COMMIT }}-${{ github.run_id }}
+
+      - name: Save incremental build cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            kernel/out
+            sm8650-modules
+          key: giuliac-baseline-r563880c-${{ github.run_id }}
+
+      - name: Stop after saving cache if module build failed
+        if: steps.build_modules.outcome != 'success'
+        run: |
+          echo "Module build failed, but incremental cache was saved for the next run."
+          exit 1
+
+      - name: Verify exact Image release
+        run: |
+          IMAGE=kernel/out/arch/arm64/boot/Image
+          file "${IMAGE}"
+          VERSION_LINE="$(strings "${IMAGE}" | grep -m1 'Linux version' || true)"
+          echo "${VERSION_LINE}"
+          printf '%s\n' "${VERSION_LINE}" | grep -Fq "Linux version ${EXPECTED_KERNEL_RELEASE} " || {
+            echo "ERROR: Image release does not exactly match ${EXPECTED_KERNEL_RELEASE}"
+            exit 1
+          }
+          ! printf '%s\n' "${VERSION_LINE}" | grep -Fq "${EXPECTED_KERNEL_RELEASE}+"
+          cp "${IMAGE}" Image
+          cp kernel/out/.config kernel.config
+
+      - name: Build verified ARM64 AnyKernel3 package
+        run: |
+          curl -fL -o AnyKernel3.zip \
+            https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip
+          unzip -q AnyKernel3.zip
+          mv AnyKernel3-master AK3
+
+          find AK3 -maxdepth 1 -type f \( \
+            -name 'Image*' -o -name '*.dtb' -o -name '*.dtbo' -o -name '*.ko' \
+          \) -delete
+          rm -rf AK3/.git AK3/.github AK3/modules AK3/patch AK3/ramdisk
+          cp Image AK3/Image
+
+          curl -fL -o AK3/tools/busybox \
+            https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/userspace/ksud/bin/aarch64/busybox
+          curl -fL -o Magisk-v30.7.apk \
+            https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk
+          unzip -p Magisk-v30.7.apk lib/arm64-v8a/libmagiskboot.so > AK3/tools/magiskboot
+
+          cat > AK3/anykernel.sh <<'EOF'
+          ### AnyKernel3 ramdisk mod script
+          # OnePlus Ace 5 / OP5D2BL1 / PKG110 / LineageOS 23.2 / Android 16
+
+          properties() { '
+          kernel.string=LineageOS 6.1.174 stock-config baseline by mg13666
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=OP5D2BL1
+          device.name2=PKG110
+          device.name3=giuliac
+          device.name4=oneplus_ace5_b
+          supported.versions=
+          supported.patchlevels=
+          '; }
+
+          BLOCK=boot;
+          IS_SLOT_DEVICE=1;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+          NO_MAGISK_CHECK=1;
+          NO_VBMETA_PARTITION_PATCH=1;
+
+          . tools/ak3-core.sh
+
+          split_boot
+          flash_boot
+          EOF
+          sed -i 's/^          //' AK3/anykernel.sh
+
+          chmod 755 \
+            AK3/anykernel.sh \
+            AK3/tools/busybox \
+            AK3/tools/magiskboot \
+            AK3/META-INF/com/google/android/update-binary
+
+          sh -n AK3/anykernel.sh
+          test -s AK3/LICENSE
+          test -s AK3/Image
+          test -s AK3/tools/busybox
+          test -s AK3/tools/magiskboot
+          file AK3/tools/busybox | grep -q 'ARM aarch64'
+          file AK3/tools/magiskboot | grep -q 'ARM aarch64'
+          grep -q '^BLOCK=boot;' AK3/anykernel.sh
+          grep -q '^IS_SLOT_DEVICE=1;' AK3/anykernel.sh
+          grep -q '^supported.versions=$' AK3/anykernel.sh
+          ! grep -qE '^(block|is_slot_device|ramdisk_compression|patch_vbmeta_flag)=' AK3/anykernel.sh
+          ! grep -q 'write_boot' AK3/anykernel.sh
+
+          cd AK3
+          zip -qr9 "../${AK3_ZIP}" . -x 'README.md' '*.git*'
+          cd ..
+          unzip -t "${AK3_ZIP}"
+          unzip -l "${AK3_ZIP}" | grep -q ' LICENSE$'
+          unzip -l "${AK3_ZIP}" | grep -q ' Image$'
+          unzip -l "${AK3_ZIP}" | grep -q ' tools/busybox$'
+          unzip -l "${AK3_ZIP}" | grep -q ' tools/magiskboot$'
+          sha256sum "${AK3_ZIP}" > "${AK3_ZIP}.sha256"
+
+      - name: Upload AnyKernel3 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3-LineageOS-6.1.174-Baseline-Ace5
+          path: |
+            AnyKernel3-LineageOS-6.1.174-Baseline-Ace5.zip
+            AnyKernel3-LineageOS-6.1.174-Baseline-Ace5.zip.sha256
+
+      - name: Upload matching module package
+        uses: actions/upload-artifact@v4
+        with:
+          name: matching-modules-baseline-r563880c
+          path: matching-modules-baseline-r563880c.tar.gz
+
+      - name: Upload debug files
+        uses: actions/upload-artifact@v4
+        with:
+          name: giuliac-lineage-6.1.174-baseline-debug
+          path: |
+            Image
+            kernel.config
