@@ -273,15 +273,39 @@ jobs:
                 rm -f Module.symvers modules.order *.ko *.mod *.mod.c *.mod.o .*.cmd
                 rm -rf .tmp_versions
               fi
-              make \
-                M="$PWD" \
-                ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-                KERNEL_SRC="$KERNEL_SRC" \
-                OUT_DIR="$OUT_DIR" \
-                O="$OUT_DIR" \
-                TARGET_BOARD_PLATFORM=pineapple \
-                "${extra_args[@]}" \
-                -j"$(nproc)" modules
+              # Vendor wrapper Makefiles are inconsistent: mmrm exposes
+              # "modules", most Qualcomm modules expose only "all", while
+              # many Oplus directories are plain Kbuild Makefiles with no
+              # wrapper target. Select the correct entry point automatically.
+              if grep -Eq '^modules[[:space:]]*:' Makefile; then
+                wrapper_target=modules
+              elif grep -Eq '^all[[:space:]]*:' Makefile; then
+                wrapper_target=all
+              else
+                wrapper_target=
+              fi
+
+              if [ -n "$wrapper_target" ]; then
+                echo "Using vendor wrapper target: $wrapper_target"
+                make \
+                  M="$PWD" \
+                  ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                  KERNEL_SRC="$KERNEL_SRC" \
+                  OUT_DIR="$OUT_DIR" \
+                  O="$OUT_DIR" \
+                  TARGET_BOARD_PLATFORM=pineapple \
+                  "${extra_args[@]}" \
+                  -j"$(nproc)" "$wrapper_target"
+              else
+                echo "Using direct Kbuild modules target"
+                make -C "$KERNEL_SRC" \
+                  M="$PWD" \
+                  ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                  O="$OUT_DIR" \
+                  TARGET_BOARD_PLATFORM=pineapple \
+                  "${extra_args[@]}" \
+                  -j"$(nproc)" modules
+              fi
             )
 
             if [ "$mod" = "qcom/opensource/mm-drivers/msm_ext_display" ]; then
