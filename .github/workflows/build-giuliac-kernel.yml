@@ -85,11 +85,20 @@ jobs:
             CONFIG_GIULIAC_DTB=y
           )
 
-          make "${MAKE_FLAGS[@]}" \
-            gki_defconfig \
-            vendor/pineapple_GKI.config \
-            vendor/oplus/pineapple_GKI.config
-          make "${MAKE_FLAGS[@]}" olddefconfig
+          if [ -f out/.config ] \
+             && grep -q '^CONFIG_LOCALVERSION_AUTO=y$' out/.config \
+             && grep -Fq 'based on r563880c) clang version 21.0.0' out/.config \
+             && grep -q '^CONFIG_UTS_NS=y$' out/.config \
+             && grep -q '^CONFIG_OVERLAY_FS=y$' out/.config \
+             && grep -q '^CONFIG_VETH=y$' out/.config; then
+            echo 'Reusing cached kernel configuration'
+          else
+            make "${MAKE_FLAGS[@]}" \
+              gki_defconfig \
+              vendor/pineapple_GKI.config \
+              vendor/oplus/pineapple_GKI.config
+            make "${MAKE_FLAGS[@]}" olddefconfig
+          fi
 
           grep -q '^CONFIG_LOCALVERSION_AUTO=y$' out/.config
           grep -Fq 'based on r563880c) clang version 21.0.0' out/.config
@@ -118,11 +127,16 @@ jobs:
         run: |
           cd kernel
           export PATH="$GITHUB_WORKSPACE/toolchain/${CLANG_VERSION}/bin:$PATH"
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-            CONFIG_OPLUS_DEVICE_DTBS=y \
-            CONFIG_GIULIA_DTB=y \
-            CONFIG_GIULIAC_DTB=y \
-            -j"$(nproc)" Image
+          IMAGE=out/arch/arm64/boot/Image
+          if [ -s "$IMAGE" ] && strings "$IMAGE" | grep -m1 'Linux version' | grep -Fq "Linux version ${EXPECTED_KERNEL_RELEASE} "; then
+            echo 'Reusing cached Image'
+          else
+            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+              CONFIG_OPLUS_DEVICE_DTBS=y \
+              CONFIG_GIULIA_DTB=y \
+              CONFIG_GIULIAC_DTB=y \
+              -j"$(nproc)" Image
+          fi
 
       - name: Build matching in-tree and external modules
         id: build_modules
@@ -234,6 +248,7 @@ jobs:
                 rm -rf .tmp_versions
               fi
               make \
+                M="$PWD" \
                 ARCH=arm64 LLVM=1 LLVM_IAS=1 \
                 KERNEL_SRC="$KERNEL_SRC" \
                 OUT_DIR="$OUT_DIR" \
