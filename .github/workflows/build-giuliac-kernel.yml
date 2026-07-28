@@ -255,6 +255,20 @@ jobs:
                 # required when M is an absolute external module directory.
                 extra_args+=(TARGET_MACHINE=ar-sg1)
               fi
+              if [ "$mod" = "qcom/opensource/camera-kernel" ]; then
+                camera_symvers=(
+                  "$MODULE_ROOT/qcom/opensource/mmrm-driver/Module.symvers"
+                  "$MODULE_ROOT/qcom/opensource/securemsm-kernel/Module.symvers"
+                  "$MODULE_ROOT/qcom/opensource/synx-kernel/Module.symvers"
+                )
+                for symvers in "${camera_symvers[@]}"; do
+                  test -s "$symvers" || {
+                    echo "ERROR: camera dependency symvers missing: $symvers"
+                    exit 1
+                  }
+                done
+                extra_args+=("KBUILD_EXTRA_SYMBOLS=${camera_symvers[*]}")
+              fi
               if [ "$mod" = "qcom/opensource/mm-drivers/msm_ext_display" ]; then
                 rm -f Module.symvers modules.order *.ko *.mod *.mod.c *.mod.o .*.cmd
                 rm -rf .tmp_versions
