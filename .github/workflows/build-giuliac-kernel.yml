@@ -238,6 +238,20 @@ jobs:
                 "${extra_args[@]}" \
                 -j"$(nproc)" modules
             )
+
+            if [ "$mod" = "qcom/opensource/mm-drivers/msm_ext_display" ]; then
+              expected="$MODULE_ROOT/qcom/opensource/mm-drivers/msm_ext_display/Module.symvers"
+              if [ ! -s "$expected" ]; then
+                found="$(find "$MODULE_ROOT/qcom/opensource/mm-drivers/msm_ext_display" "$OUT_DIR" -name Module.symvers -type f -size +0c 2>/dev/null | head -n1 || true)"
+                if [ -n "$found" ]; then
+                  cp -f "$found" "$expected"
+                  echo "Copied msm_ext_display Module.symvers from $found"
+                else
+                  : > "$expected"
+                  echo "Created empty msm_ext_display Module.symvers for dependent modpost"
+                fi
+              fi
+            fi
           done
 
           mkdir -p module-package/all-ko
